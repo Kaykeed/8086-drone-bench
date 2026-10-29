@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="8086 Drone Bench: runs the DRONE.ASM machine code on a simulated 8086 with an 8255, ADC0808, 16x2 LCD and four motors.">
+<title>8086 Drone Bench</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;600&family=Saira+Condensed:wght@600;700&display=swap">
+<style>
+/* Layout: a lab bench. Toolbar on top, three instrument panels (CPU | drone | I/O), program listing underneath. */
+:root {
+  --bg: #eef1ed; --panel: #ffffff; --panel-2: #f6f8f5; --ink: #18211d; --muted: #5a6862; --line: #d4dcd6;
+  --accent: #0b7a5c; --accent-soft: rgba(11,122,92,.12); --warn: #c2410c; --warn-soft: rgba(194,65,12,.12);
+  --led-off: #cfd8d2; --led-on: #12a37a; --lcd-bg: #b7c98a; --lcd-ink: #1c2a0e; --lcd-dim: rgba(28,42,14,.14);
+  --screen-bg: #0f1412; --screen-ink: #c9f2dc; --rotor: #2f3b35; --frame: #8a9790;
+  --f-display: "Saira Condensed", "Arial Narrow", sans-serif;
+  --f-body: "Barlow", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0e1311; --panel: #161d1a; --panel-2: #1b2420; --ink: #e2eae5; --muted: #93a39b; --line: #29342f;
+  --accent: #3dcc9d; --accent-soft: rgba(61,204,157,.14); --warn: #fb923c; --warn-soft: rgba(251,146,60,.15);
+  --led-off: #2c3833; --led-on: #3dcc9d; --lcd-bg: #9fb46c; --lcd-ink: #17200a; --lcd-dim: rgba(23,32,10,.16);
+  --screen-bg: #070a09; --screen-ink: #b9ecd1; --rotor: #c7d3cc; --frame: #6d7b74; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0e1311; --panel: #161d1a; --panel-2: #1b2420; --ink: #e2eae5; --muted: #93a39b; --line: #29342f;
+  --accent: #3dcc9d; --accent-soft: rgba(61,204,157,.14); --warn: #fb923c; --warn-soft: rgba(251,146,60,.15);
+  --led-off: #2c3833; --led-on: #3dcc9d; --lcd-bg: #9fb46c; --lcd-ink: #17200a; --lcd-dim: rgba(23,32,10,.16);
+  --screen-bg: #070a09; --screen-ink: #b9ecd1; --rotor: #c7d3cc; --frame: #6d7b74; color-scheme: dark; }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--f-body); }
+.wrap { max-width: 1320px; margin: 0 auto; padding-block: 20px 40px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 14px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; }
+h1 { font: 700 30px/1.05 var(--f-display); letter-spacing: .01em; margin: 0; text-wrap: balance; }
+header p { margin: 0; color: var(--muted); max-width: 70ch; }
+h2 { font: 600 17px/1.2 var(--f-display); letter-spacing: .06em; text-transform: uppercase; margin: 0; color: var(--muted); }
+.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--panel); }
+button, select { font: 500 14px var(--f-body); color: var(--ink); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+button:hover, select:hover { border-color: var(--accent); }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); color: var(--panel); border-color: var(--accent); min-width: 86px; }
+.tgroup { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.tlabel { color: var(--muted); font-size: 13px; }
+#status { margin-left: auto; font-size: 13px; color: var(--muted); }
+#status b { color: var(--ink); font-weight: 600; }
+
+.bench { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.15fr) minmax(0,1fr); gap: 14px; align-items: start; }
+@media (max-width: 1100px) { .bench { grid-template-columns: minmax(0,1fr) minmax(0,1fr); } .bench .drone { grid-column: 1 / -1; order: -1; } }
+@media (max-width: 700px) {
+  .bench { grid-template-columns: minmax(0,1fr); }
+  .bench .drone { order: -2; } .bench .io { order: -1; }  /* phone: drone, then the controls, then the CPU */
+  h1 { font-size: 26px; }
+  .toolbar { position: sticky; top: 0; z-index: 5; gap: 8px; padding: 8px 10px; box-shadow: 0 4px 12px rgba(0,0,0,.08); }
+  #status { display: none; }
+  button, select { padding: 9px 12px; }
+}
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 12px; min-width: 0; }
+.sub { font-size: 12px; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; font-weight: 600; }
+
+.instr { background: var(--panel-2); border-radius: 8px; padding: 10px 12px; display: grid; gap: 4px; }
+.instr .src { font: 600 16px var(--f-mono); color: var(--ink); overflow-wrap: anywhere; }
+.instr .meta { font: 12.5px var(--f-mono); color: var(--muted); overflow-wrap: anywhere; }
+.instr .phys { font: 12.5px var(--f-mono); color: var(--accent); overflow-wrap: anywhere; }
+.regs { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 6px; }
+.reg { border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; display: grid; }
+.reg span { font-size: 11px; color: var(--muted); font-weight: 600; letter-spacing: .05em; }
+.reg b { font: 600 15px var(--f-mono); }
+.reg.changed { border-color: var(--accent); background: var(--accent-soft); }
+.flags { display: grid; grid-template-columns: repeat(9, minmax(0,1fr)); gap: 4px; }
+.flag { text-align: center; border: 1px solid var(--line); border-radius: 6px; padding: 3px 0; font: 600 12px var(--f-mono); color: var(--muted); }
+.flag i { display: block; font-style: normal; font-size: 15px; color: var(--ink); }
+.flag.on { background: var(--accent-soft); border-color: var(--accent); }
+.flag.on i { color: var(--accent); }
+.bus { background: var(--panel-2); border-radius: 8px; padding: 10px 12px; font-size: 13.5px; display: grid; gap: 4px; }
+.bus .head { font: 600 14px var(--f-mono); }
+.bus ol { margin: 0; padding-left: 20px; color: var(--muted); }
+.bus ol b { color: var(--ink); font-weight: 600; }
+
+.drone-views { display: grid; grid-template-columns: minmax(0,1.1fr) minmax(0,1fr); gap: 12px; align-items: center; }
+@media (max-width: 520px) { .drone-views { grid-template-columns: minmax(0,1fr); } }
+svg { display: block; width: 100%; height: auto; max-width: 100%; }
+.svg-ink { fill: var(--ink); } .svg-muted { fill: var(--muted); }
+.lcd-wrap { background: #2b3326; border-radius: 10px; padding: 10px; }
+.lcd { background: var(--lcd-bg); border-radius: 4px; padding: 8px 10px; display: grid; gap: 4px; box-shadow: inset 0 0 0 2px rgba(0,0,0,.12); }
+.lcd-row { display: grid; grid-template-columns: repeat(16, minmax(0,1fr)); gap: 2px; }
+.lcd-row span { background: var(--lcd-dim); color: var(--lcd-ink); font: 600 clamp(12px, 2.2vw, 19px)/1.35 var(--f-mono); text-align: center; border-radius: 1px; }
+.screen { background: var(--screen-bg); color: var(--screen-ink); font: 13px/1.45 var(--f-mono); border-radius: 8px; padding: 10px 12px; min-height: 120px; white-space: pre; overflow-x: auto; margin: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 13px; }
+.chip.ok { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.chip.alarm { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); font-weight: 600; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+.sensor { display: grid; gap: 4px; }
+.sensor-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.sensor-top label { font-weight: 600; }
+.sensor-top output { font: 600 14px var(--f-mono); }
+.sensor small { color: var(--muted); font-size: 12.5px; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+input[type=range]:disabled { opacity: .45; }
+.presets { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 6px; }
+.presets button { font-size: 13px; padding: 6px 8px; text-align: left; }
+.port { display: grid; gap: 4px; }
+.port-head { display: flex; justify-content: space-between; font-size: 13px; gap: 8px; flex-wrap: wrap; }
+.port-head b { font-family: var(--f-mono); }
+.bits { display: grid; grid-template-columns: repeat(8, minmax(0,1fr)); gap: 3px; }
+.bit { display: grid; justify-items: center; gap: 2px; font: 10.5px/1.1 var(--f-mono); color: var(--muted); text-align: center; }
+.led { width: 14px; height: 14px; border-radius: 50%; background: var(--led-off); border: 1px solid var(--line); }
+.bit.on .led { background: var(--led-on); border-color: var(--led-on); box-shadow: 0 0 0 3px var(--accent-soft); }
+.bit.on { color: var(--ink); }
+table.vars { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+table.vars th, table.vars td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; }
+table.vars th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+table.vars td.val { text-align: right; }
+
+.listing { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 10px; min-width: 0; }
+.code { height: 320px; overflow: auto; background: var(--panel-2); border-radius: 8px; font: 12.5px/1.55 var(--f-mono); padding: 6px 0; }
+.code div { display: grid; grid-template-columns: 3.5em 4.2em minmax(0,1fr); white-space: pre; padding: 0 10px; }
+.code div .n { color: var(--muted); opacity: .7; } .code div .a { color: var(--muted); }
+.code div.cur { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.code div.cur .c { color: var(--ink); font-weight: 600; }
+.code .c { color: var(--ink); }
+.note { font-size: 13px; color: var(--muted); margin: 0; }
+.calc { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 10px; min-width: 0; }
+.calc-scroll { overflow-x: auto; }
+table.steps { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 520px; }
+table.steps th, table.steps td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+table.steps th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+table.steps td:first-child { color: var(--muted); width: 2.5em; font-family: var(--f-mono); }
+table.steps td.res { font-family: var(--f-mono); font-weight: 600; white-space: nowrap; }
+.match { color: var(--accent); font-weight: 600; } .nomatch { color: var(--warn); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (max-width: 700px) {
+  table.steps { min-width: 0; font-size: 13px; }
+  table.steps th, table.steps td { padding: 6px 5px; }
+  table.steps td.res { white-space: normal; }
+  .code { height: 260px; font-size: 12px; }
+}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>8086 Drone Bench</h1>
+    <p>Runs the real DRONE.ASM machine code on a simulated 8086, wired to an 8255, ADC0808, 16×2 LCD and four motors.</p>
+  </header>
+
+  <div class="toolbar" role="toolbar" aria-label="Simulator controls">
+    <div class="seg" role="group" aria-label="Mode">
+      <button id="modeLive" aria-pressed="true">Live sensors</button>
+      <button id="modeTest" aria-pressed="false">Test cases</button>
+    </div>
+    <div class="tgroup">
+      <button id="runBtn" class="primary">Pause</button>
+      <button id="stepBtn">Step</button>
+      <button id="resetBtn">Reset</button>
+    </div>
+    <div class="tgroup">
+      <label class="tlabel" for="runTo">Run to</label>
+      <select id="runTo"></select>
+      <button id="runToBtn">Go</button>
+    </div>
+    <div class="tgroup">
+      <label class="tlabel" for="speed">Speed</label>
+      <select id="speed">
+        <option value="1">Slow, 1 instruction per frame</option>
+        <option value="40">Medium</option>
+        <option value="1500" selected>Normal</option>
+        <option value="20000">Fast</option>
+      </select>
+    </div>
+    <div id="status" aria-live="polite"></div>
+  </div>
+
+  <div class="bench">
+    <section class="panel cpu" aria-labelledby="cpuH">
+      <h2 id="cpuH">8086 CPU</h2>
+      <div class="instr">
+        <div class="sub">Next instruction</div>
+        <div class="src" id="iSrc"></div>
+        <div class="meta" id="iMeta"></div>
+        <div class="phys" id="iPhys"></div>
+      </div>
+      <div>
+        <div class="sub" style="margin-bottom:6px">Registers (hex)</div>
+        <div class="regs" id="regs"></div>
+      </div>
+      <div>
+        <div class="sub" style="margin-bottom:6px">Flags</div>
+        <div class="flags" id="flags"></div>
+      </div>
+      <div class="bus" id="bus"></div>
+      <p class="note mono" id="count"></p>
+    </section>
+
+    <section class="panel drone" aria-labelledby="droneH">
+      <h2 id="droneH">Drone</h2>
+      <div class="drone-views">
+        <svg viewBox="0 -14 300 328" role="img" aria-label="Top view of the quadcopter with four motors">
+          <g stroke="var(--frame)" stroke-width="10" stroke-linecap="round">
+            <line x1="70" y1="70" x2="230" y2="230"/><line x1="230" y1="70" x2="70" y2="230"/>
+          </g>
+          <rect x="118" y="118" width="64" height="64" rx="14" fill="var(--panel-2)" stroke="var(--frame)" stroke-width="2"/>
+          <text x="150" y="146" text-anchor="middle" class="svg-ink" style="font:600 13px var(--f-mono)">8086</text>
+          <text x="150" y="163" text-anchor="middle" class="svg-muted" style="font:11px var(--f-mono)">FRONT ▲</text>
+          <g id="rotors"></g>
+        </svg>
+        <div style="display:grid;gap:8px">
+          <svg viewBox="0 0 260 150" role="img" aria-label="Side view showing the tilt and the thrust on each side">
+            <line x1="20" y1="120" x2="240" y2="120" stroke="var(--line)" stroke-width="2" stroke-dasharray="4 5"/>
+            <g id="side">
+              <rect x="50" y="86" width="160" height="12" rx="6" fill="var(--frame)"/>
+              <rect x="108" y="78" width="44" height="22" rx="6" fill="var(--panel-2)" stroke="var(--frame)" stroke-width="2"/>
+              <g id="thrustL"></g><g id="thrustR"></g>
+            </g>
+            <text x="22" y="142" class="svg-muted" style="font:12px var(--f-body)">left</text>
+            <text x="238" y="142" text-anchor="end" class="svg-muted" style="font:12px var(--f-body)">right</text>
+          </svg>
+          <div class="chips" id="droneChips"></div>
+        </div>
+      </div>
+      <div id="lcdBox">
+        <div class="sub" style="margin-bottom:6px">16×2 LCD (via Port C and PB4/PB5)</div>
+        <div class="lcd-wrap"><div class="lcd"><div class="lcd-row" id="lcd0"></div><div class="lcd-row" id="lcd1"></div></div></div>
+      </div>
+      <div id="screenBox" hidden>
+        <div class="sub" style="margin-bottom:6px">Screen output (INT 21H), stands in for the LCD</div>
+        <pre class="screen" id="screen"></pre>
+      </div>
+    </section>
+
+    <section class="panel io" aria-labelledby="ioH">
+      <h2 id="ioH">Sensors and 8255</h2>
+      <div class="sensor">
+        <div class="sensor-top"><label for="sThr">Throttle · ADC IN0</label><output id="oThr" for="sThr"></output></div>
+        <input type="range" id="sThr" min="0" max="255" value="150">
+      </div>
+      <div class="sensor">
+        <div class="sensor-top"><label for="sTilt">Tilt · ADC IN1</label><output id="oTilt" for="sTilt"></output></div>
+        <input type="range" id="sTilt" min="0" max="255" value="88">
+        <small>128 = level. Lower = left side low.</small>
+      </div>
+      <div class="sensor">
+        <div class="sensor-top"><label for="sBat">Battery · ADC IN2</label><output id="oBat" for="sBat"></output></div>
+        <input type="range" id="sBat" min="0" max="255" value="200">
+        <small>Below 100 the drone lands.</small>
+      </div>
+      <div class="presets" role="group" aria-label="Report test cases">
+        <button data-p="150,128,200">1 · Level hover</button>
+        <button data-p="150,88,200">2 · Tilted left</button>
+        <button data-p="240,200,200">3 · Hard tilt right</button>
+        <button data-p="180,128,80">4 · Low battery</button>
+      </div>
+      <div class="port"><div class="port-head"><span>Port A · 00H · input</span><b id="pAv"></b></div><div class="bits" id="pA"></div></div>
+      <div class="port"><div class="port-head"><span>Port B · 02H · output</span><b id="pBv"></b></div><div class="bits" id="pB"></div></div>
+      <div class="port"><div class="port-head"><span>Port C · 04H · output</span><b id="pCv"></b></div><div class="bits" id="pC"></div></div>
+      <p class="note mono" id="ctrlNote"></p>
+      <div>
+        <div class="sub" style="margin-bottom:4px">Program variables (memory)</div>
+        <table class="vars"><thead><tr><th>Name</th><th>Address</th><th style="text-align:right">Value</th></tr></thead><tbody id="vars"></tbody></table>
+      </div>
+    </section>
+  </div>
+
+  <section class="calc" aria-labelledby="calcH">
+    <h2 id="calcH">Calculations for the last completed loop</h2>
+    <div class="calc-scroll"><table class="steps"><thead><tr><th>#</th><th>Step</th><th>Working</th><th>Result</th></tr></thead><tbody id="calcBody"></tbody></table></div>
+    <p class="note" id="calcNote"></p>
+  </section>
+
+  <section class="listing" aria-labelledby="lstH">
+    <h2 id="lstH">DRONE.ASM · program listing</h2>
+    <div class="code" id="code" tabindex="0" aria-label="Program listing, current line highlighted"></div>
+    <p class="note">Simulated 8086 loaded as a DOS .COM program at segment 0700H. Timing is not cycle-accurate; the instructions, registers, flags and port values are.</p>
+  </section>
+</div>
+
+<script>
+const DATA = {"prog":[176,144,230,6,176,0,230,2,230,4,160,109,3,60,1,116,3,232,216,1,176,0,232,180,0,162,111,3,176,1,232,172,0,162,112,3,176,2,232,164,0,162,113,3,232,29,0,232,114,0,232,236,0,160,109,3,60,1,117,216,160,110,3,254,192,162,110,3,60,4,114,204,180,76,205,33,176,0,162,116,3,160,113,3,60,100,115,14,176,1,162,116,3,176,60,162,114,3,162,115,3,195,184,128,0,138,30,112,3,183,0,41,216,177,2,211,248,137,194,138,30,111,3,183,0,137,216,1,208,232,14,0,162,114,3,137,216,41,208,232,4,0,162,115,3,195,131,248,0,125,4,184,0,0,195,61,255,0,126,3,184,255,0,195,185,255,0,179,0,176,0,58,30,114,3,115,2,12,5,58,30,115,3,115,2,12,10,138,38,116,3,128,252,1,117,2,12,64,230,2,254,195,226,221,195,83,81,138,38,109,3,128,252,1,117,19,180,0,137,195,160,110,3,177,3,246,225,1,195,138,135,117,3,235,51,136,196,176,0,246,196,1,116,2,176,1,230,6,176,2,246,196,2,116,2,176,3,230,6,176,5,230,6,176,4,230,6,185,50,0,226,254,176,7,230,6,228,0,136,196,176,6,230,6,136,224,89,91,195,232,71,0,190,129,3,232,116,0,160,111,3,232,123,0,190,134,3,232,104,0,160,112,3,232,111,0,232,57,0,190,141,3,232,89,0,160,114,3,232,96,0,190,144,3,232,77,0,160,115,3,232,84,0,190,148,3,160,116,3,60,1,117,3,190,154,3,232,55,0,232,27,0,195,160,109,3,60,1,116,5,176,128,232,196,0,195,160,109,3,60,1,116,20,176,192,232,183,0,195,160,109,3,60,1,117,6,232,4,0,232,1,0,195,176,13,232,57,0,176,10,232,52,0,195,138,4,60,0,116,6,232,42,0,70,235,244,195,83,180,0,179,100,246,243,80,4,48,232,25,0,88,136,224,180,0,179,10,246,243,80,4,48,232,10,0,88,136,224,4,48,232,2,0,91,195,80,82,138,38,109,3,128,252,1,117,8,136,194,180,2,205,33,235,5,180,16,232,90,0,90,88,195,185,184,11,232,120,0,176,48,180,0,232,97,0,185,220,5,232,107,0,176,48,180,0,232,84,0,185,88,2,232,94,0,176,48,180,0,232,71,0,185,88,2,232,81,0,176,32,180,0,232,58,0,185,88,2,232,68,0,176,40,232,16,0,176,12,232,11,0,176,6,232,6,0,176,1,232,1,0,195,80,180,0,232,2,0,88,195,80,81,80,232,17,0,88,177,4,210,224,232,9,0,185,88,2,232,19,0,89,88,195,36,240,230,4,136,224,12,32,230,2,144,136,224,230,2,195,226,254,195,1,0,0,0,0,0,0,0,150,128,200,150,88,200,240,200,200,180,128,80,84,72,82,61,0,32,84,73,76,84,61,0,76,61,0,32,82,61,0,32,79,75,32,32,0,32,76,65,78,68,0],"lines":[[-1,"; ====================================================================="],[-1,";  DRONE.ASM  -  Drone flight-control unit using 8086 + 8255 PPI"],[-1,";  21ECC313P Embedded Microcontrollers - PBL-3 Assignment"],[-1,";"],[-1,";  What it does (every pass of the main loop):"],[-1,";    1. Reads throttle, tilt and battery through the ADC0808 (ch 0,1,2)"],[-1,";    2. Computes left and right motor speeds to keep the drone level"],[-1,";    3. Low battery -> buzzer ON and both sides drop to landing speed"],[-1,";    4. Drives 4 motors with software PWM through 8255 Port B"],[-1,";    5. Shows status (16x2 LCD on hardware, screen in simulation)"],[-1,";"],[-1,";  SIMMODE = 1 : test-case mode. Sensor values come from the TESTS"],[-1,";                table and the \"LCD\" lines are printed on the screen."],[-1,";  SIMMODE = 0 : real hardware / Proteus. Reads the ADC0808 and"],[-1,";                writes to the LCD, looping forever."],[-1,";"],[-1,";  Assembles as a .COM program (NASM, EMU8086 or MASM-style)."],[-1,"; ====================================================================="],[-1,""],[-1,"        ORG 100H"],[-1,""],[-1,"; ----------------- 8255 port addresses (see section 3.2) -------------"],[-1,"PORT_A  EQU 00H         ; input  : ADC0808 data D0-D7"],[-1,"PORT_B  EQU 02H         ; output : motors, LCD RS/E, buzzer"],[-1,"PORT_C  EQU 04H         ; output : ADC control (PC0-3), LCD data (PC4-7)"],[-1,"CTRL    EQU 06H         ; 8255 control register"],[-1,"CWORD   EQU 90H         ; mode 0, PA in, PB out, PC out"],[-1,""],[-1,"; ----------------- Port B bit masks ----------------------------------"],[-1,"LEFT_M  EQU 05H         ; PB0 = M1 front-left,  PB2 = M3 rear-left"],[-1,"RIGHT_M EQU 0AH         ; PB1 = M2 front-right, PB3 = M4 rear-right"],[-1,"LCD_RS  EQU 10H         ; PB4"],[-1,"LCD_E   EQU 20H         ; PB5"],[-1,"BUZZER  EQU 40H         ; PB6"],[-1,""],[-1,"; ----------------- Flight constants ----------------------------------"],[-1,"LEVEL   EQU 128         ; tilt reading when the drone is level"],[-1,"BAT_LOW EQU 100         ; below this the battery is low (about 39%)"],[-1,"LAND_SP EQU 60          ; motor speed used while landing"],[-1,"NTESTS  EQU 4           ; number of simulation test cases"],[-1,""],[-1,"; ====================================================================="],[-1,"START:"],[256,"        MOV  AL, CWORD          ; configure the 8255"],[258,"        OUT  CTRL, AL"],[260,"        MOV  AL, 0"],[262,"        OUT  PORT_B, AL         ; all motors off, buzzer off"],[264,"        OUT  PORT_C, AL         ; ADC lines idle"],[-1,""],[266,"        MOV  AL, [SIMMODE]"],[269,"        CMP  AL, 1"],[271,"        JE   MAINLOOP"],[273,"        CALL LCD_INIT           ; hardware only"],[-1,""],[-1,"MAINLOOP:"],[276,"        MOV  AL, 0              ; channel 0 = throttle"],[278,"        CALL READ_ADC"],[281,"        MOV  [THR], AL"],[284,"        MOV  AL, 1              ; channel 1 = tilt"],[286,"        CALL READ_ADC"],[289,"        MOV  [TILT], AL"],[292,"        MOV  AL, 2              ; channel 2 = battery"],[294,"        CALL READ_ADC"],[297,"        MOV  [BAT], AL"],[-1,""],[300,"        CALL CONTROL            ; decide motor speeds"],[303,"        CALL PWM_FRAME          ; drive the motors"],[306,"        CALL SHOW               ; display status"],[-1,""],[309,"        MOV  AL, [SIMMODE]"],[312,"        CMP  AL, 1"],[314,"        JNE  MAINLOOP           ; hardware: repeat forever"],[-1,""],[316,"        MOV  AL, [CASENO]       ; simulation: next test case"],[319,"        INC  AL"],[321,"        MOV  [CASENO], AL"],[324,"        CMP  AL, NTESTS"],[326,"        JB   MAINLOOP"],[-1,""],[328,"        MOV  AH, 4CH            ; simulation finished - back to DOS"],[330,"        INT  21H"],[-1,""],[-1,"; ====================================================================="],[-1,"; CONTROL : works out LSPD and RSPD from THR, TILT and BAT"],[-1,";   correction = (LEVEL - TILT) / 4"],[-1,";   left  = THR + correction      right = THR - correction"],[-1,";   (tilt below 128 = left side low, so the left motors speed up)"],[-1,"; ====================================================================="],[-1,"CONTROL:"],[332,"        MOV  AL, 0"],[334,"        MOV  [ALARM], AL"],[337,"        MOV  AL, [BAT]"],[340,"        CMP  AL, BAT_LOW"],[342,"        JAE  STABILISE"],[344,"        MOV  AL, 1              ; low battery: alarm and land"],[346,"        MOV  [ALARM], AL"],[349,"        MOV  AL, LAND_SP"],[351,"        MOV  [LSPD], AL"],[354,"        MOV  [RSPD], AL"],[357,"        RET"],[-1,""],[-1,"STABILISE:"],[358,"        MOV  AX, LEVEL"],[361,"        MOV  BL, [TILT]"],[365,"        MOV  BH, 0"],[367,"        SUB  AX, BX             ; AX = 128 - tilt  (signed)"],[369,"        MOV  CL, 2"],[371,"        SAR  AX, CL             ; divide by 4, keeping the sign"],[373,"        MOV  DX, AX             ; DX = correction"],[-1,""],[375,"        MOV  BL, [THR]"],[379,"        MOV  BH, 0"],[381,"        MOV  AX, BX"],[383,"        ADD  AX, DX             ; left = throttle + correction"],[385,"        CALL CLAMP"],[388,"        MOV  [LSPD], AL"],[-1,""],[391,"        MOV  AX, BX"],[393,"        SUB  AX, DX             ; right = throttle - correction"],[395,"        CALL CLAMP"],[398,"        MOV  [RSPD], AL"],[401,"        RET"],[-1,""],[-1,"; CLAMP : keeps the signed value in AX inside 0..255"],[-1,"CLAMP:"],[402,"        CMP  AX, 0"],[405,"        JGE  CL_HIGH"],[407,"        MOV  AX, 0"],[410,"        RET"],[-1,"CL_HIGH:"],[411,"        CMP  AX, 255"],[414,"        JLE  CL_DONE"],[416,"        MOV  AX, 255"],[-1,"CL_DONE:"],[419,"        RET"],[-1,""],[-1,"; ====================================================================="],[-1,"; PWM_FRAME : one software-PWM frame of 255 steps."],[-1,";   At step n a motor is ON if its speed > n,"],[-1,";   so speed 255 = always on, speed 128 = on about half the time."],[-1,"; ====================================================================="],[-1,"PWM_FRAME:"],[420,"        MOV  CX, 255"],[423,"        MOV  BL, 0              ; BL = step number"],[-1,"PWM_STEP:"],[425,"        MOV  AL, 0"],[427,"        CMP  BL, [LSPD]"],[431,"        JAE  PWM_R"],[433,"        OR   AL, LEFT_M"],[-1,"PWM_R:"],[435,"        CMP  BL, [RSPD]"],[439,"        JAE  PWM_BZ"],[441,"        OR   AL, RIGHT_M"],[-1,"PWM_BZ:"],[443,"        MOV  AH, [ALARM]"],[447,"        CMP  AH, 1"],[450,"        JNE  PWM_OUT"],[452,"        OR   AL, BUZZER"],[-1,"PWM_OUT:"],[454,"        OUT  PORT_B, AL         ; update all four motors at once"],[456,"        INC  BL"],[458,"        LOOP PWM_STEP"],[460,"        RET"],[-1,""],[-1,"; ====================================================================="],[-1,"; READ_ADC : AL = channel (0-2)  ->  AL = 8-bit reading (0-255)"],[-1,"; ====================================================================="],[-1,"READ_ADC:"],[461,"        PUSH BX"],[462,"        PUSH CX"],[463,"        MOV  AH, [SIMMODE]"],[467,"        CMP  AH, 1"],[470,"        JNE  ADC_HW"],[-1,""],[-1,"        ; ---- simulation: value = TESTS[CASENO*3 + channel] ----"],[472,"        MOV  AH, 0"],[474,"        MOV  BX, AX             ; BX = channel"],[476,"        MOV  AL, [CASENO]"],[479,"        MOV  CL, 3"],[481,"        MUL  CL                 ; AX = case number * 3"],[483,"        ADD  BX, AX"],[485,"        MOV  AL, [TESTS+BX]"],[489,"        JMP  ADC_DONE"],[-1,""],[-1,"        ; ---- hardware: ADC0808 handshake using 8255 BSR mode ----"],[-1,"ADC_HW:"],[491,"        MOV  AH, AL             ; AH = channel"],[493,"        MOV  AL, 00H            ; PC0 (ADD A) = bit 0 of channel"],[495,"        TEST AH, 01H"],[498,"        JZ   ADC_A"],[500,"        MOV  AL, 01H"],[-1,"ADC_A:"],[502,"        OUT  CTRL, AL"],[504,"        MOV  AL, 02H            ; PC1 (ADD B) = bit 1 of channel"],[506,"        TEST AH, 02H"],[509,"        JZ   ADC_B"],[511,"        MOV  AL, 03H"],[-1,"ADC_B:"],[513,"        OUT  CTRL, AL"],[515,"        MOV  AL, 05H            ; PC2 = 1 : ALE + START high"],[517,"        OUT  CTRL, AL"],[519,"        MOV  AL, 04H            ; PC2 = 0 : conversion starts"],[521,"        OUT  CTRL, AL"],[523,"        MOV  CX, 50             ; wait about 170 us (EOC not used)"],[-1,"ADC_WAIT:"],[526,"        LOOP ADC_WAIT"],[528,"        MOV  AL, 07H            ; PC3 = 1 : OE high, result on bus"],[530,"        OUT  CTRL, AL"],[532,"        IN   AL, PORT_A         ; read the converted value"],[534,"        MOV  AH, AL"],[536,"        MOV  AL, 06H            ; PC3 = 0 : OE low"],[538,"        OUT  CTRL, AL"],[540,"        MOV  AL, AH"],[-1,"ADC_DONE:"],[542,"        POP  CX"],[543,"        POP  BX"],[544,"        RET"],[-1,""],[-1,"; ====================================================================="],[-1,"; SHOW : line 1 \"THR=150 TILT=128\"   line 2 \"L=150 R=150 OK  \""],[-1,";        or, on low battery,          line 2 \"L=060 R=060 LAND\""],[-1,"; ====================================================================="],[-1,"SHOW:"],[545,"        CALL LINE1"],[548,"        MOV  SI, S_THR"],[551,"        CALL PUTS"],[554,"        MOV  AL, [THR]"],[557,"        CALL PUTNUM"],[560,"        MOV  SI, S_TILT"],[563,"        CALL PUTS"],[566,"        MOV  AL, [TILT]"],[569,"        CALL PUTNUM"],[-1,""],[572,"        CALL LINE2"],[575,"        MOV  SI, S_LEFT"],[578,"        CALL PUTS"],[581,"        MOV  AL, [LSPD]"],[584,"        CALL PUTNUM"],[587,"        MOV  SI, S_RIGHT"],[590,"        CALL PUTS"],[593,"        MOV  AL, [RSPD]"],[596,"        CALL PUTNUM"],[599,"        MOV  SI, S_OK"],[602,"        MOV  AL, [ALARM]"],[605,"        CMP  AL, 1"],[607,"        JNE  SHOW_END"],[609,"        MOV  SI, S_LAND"],[-1,"SHOW_END:"],[612,"        CALL PUTS"],[615,"        CALL ENDSHOW"],[618,"        RET"],[-1,""],[-1,"; LINE1 / LINE2 / ENDSHOW : move to a line (LCD) or new lines (screen)"],[-1,"LINE1:"],[619,"        MOV  AL, [SIMMODE]"],[622,"        CMP  AL, 1"],[624,"        JE   L1_SIM"],[626,"        MOV  AL, 80H            ; LCD: cursor to line 1"],[628,"        CALL LCD_CMD"],[-1,"L1_SIM:"],[631,"        RET"],[-1,""],[-1,"LINE2:"],[632,"        MOV  AL, [SIMMODE]"],[635,"        CMP  AL, 1"],[637,"        JE   NEWLINE"],[639,"        MOV  AL, 0C0H           ; LCD: cursor to line 2"],[641,"        CALL LCD_CMD"],[644,"        RET"],[-1,""],[-1,"ENDSHOW:"],[645,"        MOV  AL, [SIMMODE]"],[648,"        CMP  AL, 1"],[650,"        JNE  ES_DONE"],[652,"        CALL NEWLINE"],[655,"        CALL NEWLINE"],[-1,"ES_DONE:"],[658,"        RET"],[-1,""],[-1,"NEWLINE:"],[659,"        MOV  AL, 0DH"],[661,"        CALL PUTC"],[664,"        MOV  AL, 0AH"],[666,"        CALL PUTC"],[669,"        RET"],[-1,""],[-1,"; PUTS : prints the 0-terminated string at DS:SI"],[-1,"PUTS:"],[670,"        MOV  AL, [SI]"],[672,"        CMP  AL, 0"],[674,"        JE   PUTS_END"],[676,"        CALL PUTC"],[679,"        INC  SI"],[680,"        JMP  PUTS"],[-1,"PUTS_END:"],[682,"        RET"],[-1,""],[-1,"; PUTNUM : prints AL (0-255) as three decimal digits"],[-1,"PUTNUM:"],[683,"        PUSH BX"],[684,"        MOV  AH, 0"],[686,"        MOV  BL, 100"],[688,"        DIV  BL                 ; AL = hundreds, AH = remainder"],[690,"        PUSH AX"],[691,"        ADD  AL, '0'"],[693,"        CALL PUTC"],[696,"        POP  AX"],[697,"        MOV  AL, AH"],[699,"        MOV  AH, 0"],[701,"        MOV  BL, 10"],[703,"        DIV  BL                 ; AL = tens, AH = units"],[705,"        PUSH AX"],[706,"        ADD  AL, '0'"],[708,"        CALL PUTC"],[711,"        POP  AX"],[712,"        MOV  AL, AH"],[714,"        ADD  AL, '0'"],[716,"        CALL PUTC"],[719,"        POP  BX"],[720,"        RET"],[-1,""],[-1,"; PUTC : one character in AL -> screen (simulation) or LCD (hardware)"],[-1,"PUTC:"],[721,"        PUSH AX"],[722,"        PUSH DX"],[723,"        MOV  AH, [SIMMODE]"],[727,"        CMP  AH, 1"],[730,"        JNE  PUTC_LCD"],[732,"        MOV  DL, AL"],[734,"        MOV  AH, 02H            ; DOS: print character in DL"],[736,"        INT  21H"],[738,"        JMP  PUTC_END"],[-1,"PUTC_LCD:"],[740,"        MOV  AH, LCD_RS         ; RS = 1 : data"],[742,"        CALL LCD_BYTE"],[-1,"PUTC_END:"],[745,"        POP  DX"],[746,"        POP  AX"],[747,"        RET"],[-1,""],[-1,"; ====================================================================="],[-1,"; LCD routines (hardware only) - 4-bit mode"],[-1,";   data D4-D7 on PC4-PC7, RS on PB4, E on PB5, R/W tied to ground"],[-1,"; ====================================================================="],[-1,"LCD_INIT:"],[748,"        MOV  CX, 3000           ; wait > 15 ms after power-up"],[751,"        CALL DELAY"],[754,"        MOV  AL, 30H            ; wake-up sequence: 3 x 30H"],[756,"        MOV  AH, 0"],[758,"        CALL LCD_NIB"],[761,"        MOV  CX, 1500"],[764,"        CALL DELAY"],[767,"        MOV  AL, 30H"],[769,"        MOV  AH, 0"],[771,"        CALL LCD_NIB"],[774,"        MOV  CX, 600"],[777,"        CALL DELAY"],[780,"        MOV  AL, 30H"],[782,"        MOV  AH, 0"],[784,"        CALL LCD_NIB"],[787,"        MOV  CX, 600"],[790,"        CALL DELAY"],[793,"        MOV  AL, 20H            ; switch to 4-bit mode"],[795,"        MOV  AH, 0"],[797,"        CALL LCD_NIB"],[800,"        MOV  CX, 600"],[803,"        CALL DELAY"],[806,"        MOV  AL, 28H            ; 4-bit, 2 lines, 5x7 font"],[808,"        CALL LCD_CMD"],[811,"        MOV  AL, 0CH            ; display on, cursor off"],[813,"        CALL LCD_CMD"],[816,"        MOV  AL, 06H            ; cursor moves right"],[818,"        CALL LCD_CMD"],[821,"        MOV  AL, 01H            ; clear display"],[823,"        CALL LCD_CMD"],[826,"        RET"],[-1,""],[-1,"; LCD_CMD : command byte in AL (RS = 0)"],[-1,"LCD_CMD:"],[827,"        PUSH AX"],[828,"        MOV  AH, 0"],[830,"        CALL LCD_BYTE"],[833,"        POP  AX"],[834,"        RET"],[-1,""],[-1,"; LCD_BYTE : byte in AL, RS bit in AH. Sends high nibble then low nibble."],[-1,"LCD_BYTE:"],[835,"        PUSH AX"],[836,"        PUSH CX"],[837,"        PUSH AX"],[838,"        CALL LCD_NIB            ; high nibble"],[841,"        POP  AX"],[842,"        MOV  CL, 4"],[844,"        SHL  AL, CL"],[846,"        CALL LCD_NIB            ; low nibble"],[849,"        MOV  CX, 600            ; about 2 ms for the LCD to finish"],[852,"        CALL DELAY"],[855,"        POP  CX"],[856,"        POP  AX"],[857,"        RET"],[-1,""],[-1,"; LCD_NIB : upper 4 bits of AL -> LCD, AH = RS bit. Pulses E."],[-1,"LCD_NIB:"],[858,"        AND  AL, 0F0H           ; keep PC0-PC3 (ADC lines) at 0"],[860,"        OUT  PORT_C, AL"],[862,"        MOV  AL, AH"],[864,"        OR   AL, LCD_E          ; E = 1"],[866,"        OUT  PORT_B, AL"],[868,"        NOP"],[869,"        MOV  AL, AH             ; E = 0 : LCD latches the nibble"],[871,"        OUT  PORT_B, AL"],[873,"        RET"],[-1,""],[-1,"; DELAY : about 17 clock cycles x CX"],[-1,"DELAY:"],[874,"        LOOP DELAY"],[876,"        RET"],[-1,""],[-1,"; ====================================================================="],[-1,"; DATA"],[-1,"; ====================================================================="],[877,"SIMMODE DB 1                    ; 1 = test cases, 0 = live sensors / hardware"],[878,"CASENO  DB 0"],[879,"THR     DB 0"],[880,"TILT    DB 0"],[881,"BAT     DB 0"],[882,"LSPD    DB 0"],[883,"RSPD    DB 0"],[884,"ALARM   DB 0"],[-1,""],[-1,"; Simulation test cases : throttle, tilt, battery"],[885,"TESTS   DB 150, 128, 200        ; 1. level hover"],[888,"        DB 150,  88, 200        ; 2. tilted to the left"],[891,"        DB 240, 200, 200        ; 3. hard tilt right at high throttle"],[894,"        DB 180, 128,  80        ; 4. low battery"],[-1,""],[897,"S_THR   DB 'THR=', 0"],[902,"S_TILT  DB ' TILT=', 0"],[909,"S_LEFT  DB 'L=', 0"],[912,"S_RIGHT DB ' R=', 0"],[916,"S_OK    DB ' OK  ', 0"],[922,"S_LAND  DB ' LAND', 0"]],"labels":{"START":256,"MAINLOOP":276,"CONTROL":332,"STABILISE":358,"CLAMP":402,"CL_HIGH":411,"CL_DONE":419,"PWM_FRAME":420,"PWM_STEP":425,"PWM_R":435,"PWM_BZ":443,"PWM_OUT":454,"READ_ADC":461,"ADC_HW":491,"ADC_A":502,"ADC_B":513,"ADC_WAIT":526,"ADC_DONE":542,"SHOW":545,"SHOW_END":612,"LINE1":619,"L1_SIM":631,"LINE2":632,"ENDSHOW":645,"ES_DONE":658,"NEWLINE":659,"PUTS":670,"PUTS_END":682,"PUTNUM":683,"PUTC":721,"PUTC_LCD":740,"PUTC_END":745,"LCD_INIT":748,"LCD_CMD":827,"LCD_BYTE":835,"LCD_NIB":858,"DELAY":874,"SIMMODE":877,"CASENO":878,"THR":879,"TILT":880,"BAT":881,"LSPD":882,"RSPD":883,"ALARM":884,"TESTS":885,"S_THR":897,"S_TILT":902,"S_LEFT":909,"S_RIGHT":912,"S_OK":916,"S_LAND":922}};
+const L = DATA.labels, SEG = 0x0700;
+const hex = (v, n) => v.toString(16).toUpperCase().padStart(n, '0');
+
+/* ---------------- 8086 core (subset used by DRONE.ASM) ---------------- */
+class CPU {
+  constructor() {
+    this.m = new Uint8Array(65536); this.m.set(DATA.prog, 0x100);
+    this.r = new Uint16Array(8); this.r[4] = 0xFFFE; this.ip = 0x100;
+    this.f = { C:0, P:0, A:0, Z:0, S:0, T:0, I:1, D:0, O:0 };
+    this.halt = false; this.err = ''; this.steps = 0; this.lastIO = null;
+    this.out = () => {}; this.inp = () => 0; this.dos = () => {};
+  }
+  r8(i) { const v = this.r[i & 3]; return i >= 4 ? v >> 8 : v & 255; }
+  w8(i, v) { v &= 255; const j = i & 3; this.r[j] = i >= 4 ? (this.r[j] & 0xFF) | (v << 8) : (this.r[j] & 0xFF00) | v; }
+  fb() { const b = this.m[this.ip]; this.ip = (this.ip + 1) & 0xFFFF; return b; }
+  fw() { return this.fb() | (this.fb() << 8); }
+  sx(b) { return b & 0x80 ? b - 256 : b; }
+  push(v) { this.r[4] -= 2; this.m[this.r[4]] = v & 255; this.m[(this.r[4] + 1) & 0xFFFF] = (v >> 8) & 255; }
+  pop() { const v = this.m[this.r[4]] | (this.m[(this.r[4] + 1) & 0xFFFF] << 8); this.r[4] += 2; return v; }
+  modrm() {
+    const b = this.fb(), mod = b >> 6, reg = (b >> 3) & 7, rm = b & 7, R = this.r;
+    if (mod === 3) return [reg, ['r', rm]];
+    if (mod === 0 && rm === 6) return [reg, ['m', this.fw()]];
+    const base = [R[3]+R[6], R[3]+R[7], R[5]+R[6], R[5]+R[7], R[6], R[7], R[5], R[3]][rm];
+    let d = 0; if (mod === 1) d = this.sx(this.fb()); else if (mod === 2) d = this.fw();
+    return [reg, ['m', (base + d) & 0xFFFF]];
+  }
+  rd(op, w) { const [t, a] = op; if (t === 'r') return w ? this.r[a] : this.r8(a); return w ? this.m[a] | (this.m[(a+1)&0xFFFF] << 8) : this.m[a]; }
+  wr(op, w, v) { const [t, a] = op; if (t === 'r') { if (w) this.r[a] = v; else this.w8(a, v); return; } this.m[a] = v & 255; if (w) this.m[(a+1)&0xFFFF] = (v >> 8) & 255; }
+  szp(r, w) { const bits = w ? 16 : 8, mask = (1 << bits) - 1; r &= mask; this.f.Z = +(r === 0); this.f.S = (r >> (bits - 1)) & 1; let p = r & 255, c = 0; while (p) { c += p & 1; p >>= 1; } this.f.P = +(c % 2 === 0); return r; }
+  alu(k, a, b, w) {
+    const bits = w ? 16 : 8, mask = (1 << bits) - 1, sb = 1 << (bits - 1);
+    if (k === 0) { const r = a + b; this.f.C = +(r > mask); this.f.O = +(((a ^ r) & (b ^ r) & sb) !== 0); this.f.A = +(((a ^ b ^ r) & 0x10) !== 0); return this.szp(r, w); }
+    if (k === 5 || k === 7) { const r = a - b; this.f.C = +(b > a); this.f.O = +(((a ^ b) & (a ^ r) & sb) !== 0); this.f.A = +(((a ^ b ^ r) & 0x10) !== 0); return this.szp(r, w); }
+    if (k === 1) { this.f.C = 0; this.f.O = 0; this.f.A = 0; return this.szp(a | b, w); }
+    if (k === 4) { this.f.C = 0; this.f.O = 0; this.f.A = 0; return this.szp(a & b, w); }
+    throw new Error('ALU op ' + k);
+  }
+  cond(c) { const f = this.f; return [f.O, !f.O, f.C, !f.C, f.Z, !f.Z, f.C || f.Z, !(f.C || f.Z), f.S, !f.S, f.P, !f.P, f.S !== f.O, f.S === f.O, f.Z || f.S !== f.O, !f.Z && f.S === f.O][c]; }
+  step() {
+    if (this.halt) return;
+    this.steps++; this.lastIO = null; const start = this.ip; const o = this.fb();
+    try {
+      if ([0,1,2,3,8,9,10,11,0x20,0x21,0x22,0x23,0x28,0x29,0x2A,0x2B,0x38,0x39,0x3A,0x3B].includes(o)) {
+        const k = o >> 3, w = o & 1, d = o & 2, [reg, op] = this.modrm(), ro = ['r', reg];
+        const dst = d ? ro : op, src = d ? op : ro; const r = this.alu(k, this.rd(dst, w), this.rd(src, w), w); if (k !== 7) this.wr(dst, w, r);
+      } else if ([4,5,0x0C,0x0D,0x24,0x25,0x2C,0x2D,0x3C,0x3D].includes(o)) {
+        const k = o >> 3, w = o & 1, b = w ? this.fw() : this.fb(), acc = ['r', 0]; const r = this.alu(k, this.rd(acc, w), b, w); if (k !== 7) this.wr(acc, w, r);
+      } else if (o === 0x80 || o === 0x81 || o === 0x83) {
+        const [reg, op] = this.modrm(), w = o !== 0x80; const b = o === 0x81 ? this.fw() : o === 0x83 ? this.sx(this.fb()) & 0xFFFF : this.fb();
+        const r = this.alu(reg, this.rd(op, w), b, w); if (reg !== 7) this.wr(op, w, r);
+      } else if (o >= 0x88 && o <= 0x8B) {
+        const w = o & 1, [reg, op] = this.modrm(); if (o & 2) this.wr(['r', reg], w, this.rd(op, w)); else this.wr(op, w, this.rd(['r', reg], w));
+      } else if (o === 0xC6 || o === 0xC7) { const w = o & 1, [, op] = this.modrm(); this.wr(op, w, w ? this.fw() : this.fb()); }
+      else if (o >= 0xB0 && o <= 0xB7) this.w8(o - 0xB0, this.fb());
+      else if (o >= 0xB8 && o <= 0xBF) this.r[o - 0xB8] = this.fw();
+      else if (o === 0xA0) this.w8(0, this.m[this.fw()]);
+      else if (o === 0xA2) this.m[this.fw()] = this.r8(0);
+      else if (o === 0xA8) this.alu(4, this.r8(0), this.fb(), 0);
+      else if (o === 0xF6 || o === 0xF7) {
+        const w = o & 1, [reg, op] = this.modrm(), v = this.rd(op, w);
+        if (reg === 0) this.alu(4, v, w ? this.fw() : this.fb(), w);
+        else if (reg === 4 && !w) { this.r[0] = this.r8(0) * v; this.f.C = this.f.O = +(this.r[0] > 255); }
+        else if (reg === 6 && !w) { const ax = this.r[0]; if (!v) throw new Error('Divide by zero'); const q = Math.floor(ax / v); if (q > 255) throw new Error('Divide overflow'); this.w8(0, q); this.w8(4, ax % v); }
+        else throw new Error('F6/F7 /' + reg);
+      } else if (o >= 0xD0 && o <= 0xD3) {
+        const w = o & 1, [reg, op] = this.modrm(), n = o < 0xD2 ? 1 : this.r8(1), bits = w ? 16 : 8, mask = (1 << bits) - 1; let v = this.rd(op, w);
+        for (let i = 0; i < n; i++) {
+          if (reg === 4) { this.f.C = (v >> (bits - 1)) & 1; v = (v << 1) & mask; }
+          else if (reg === 7) { this.f.C = v & 1; v = (v >> 1) | (v & (1 << (bits - 1))); }
+          else throw new Error('shift /' + reg);
+        }
+        this.szp(v, w); this.wr(op, w, v);
+      } else if (o === 0xFE) { const [reg, op] = this.modrm(), c = this.f.C; const r = this.alu(reg === 0 ? 0 : 5, this.rd(op, 0), 1, 0); this.f.C = c; this.wr(op, 0, r); }
+      else if (o >= 0x40 && o <= 0x4F) { const i = o & 7, c = this.f.C; this.r[i] = this.alu(o < 0x48 ? 0 : 5, this.r[i], 1, 1); this.f.C = c; }
+      else if (o >= 0x50 && o <= 0x57) this.push(this.r[o - 0x50]);
+      else if (o >= 0x58 && o <= 0x5F) this.r[o - 0x58] = this.pop();
+      else if (o === 0xE8) { const d = this.fw(); this.push(this.ip); this.ip = (this.ip + d) & 0xFFFF; }
+      else if (o === 0xC3) this.ip = this.pop();
+      else if (o === 0xE9) { const d = this.fw(); this.ip = (this.ip + d) & 0xFFFF; }
+      else if (o === 0xEB) { const d = this.sx(this.fb()); this.ip = (this.ip + d) & 0xFFFF; }
+      else if (o >= 0x70 && o <= 0x7F) { const d = this.sx(this.fb()); if (this.cond(o - 0x70)) this.ip = (this.ip + d) & 0xFFFF; }
+      else if (o === 0xE2) { const d = this.sx(this.fb()); this.r[1]--; if (this.r[1]) this.ip = (this.ip + d) & 0xFFFF; }
+      else if (o === 0xE6) { const p = this.fb(), v = this.r8(0); this.lastIO = { dir: 'out', port: p, val: v, at: start }; this.out(p, v, start); }
+      else if (o === 0xE4) { const p = this.fb(); const v = this.inp(p) & 255; this.w8(0, v); this.lastIO = { dir: 'in', port: p, val: v, at: start }; }
+      else if (o === 0x90) {}
+      else if (o === 0xCD) { const n = this.fb(), ah = this.r8(4); if (n === 0x21 && ah === 2) this.dos(String.fromCharCode(this.r8(2))); else if (n === 0x21 && ah === 0x4C) this.halt = true; else throw new Error('INT ' + hex(n, 2) + 'H, AH=' + hex(ah, 2) + 'H not simulated'); }
+      else throw new Error('Opcode ' + hex(o, 2) + 'H not simulated');
+    } catch (e) { this.halt = true; this.err = e.message + ' at ' + hex(start, 4) + 'H'; }
+  }
+}
+
+/* ---------------- hardware around the CPU ---------------- */
+const codeLines = new Map(); DATA.lines.forEach(([a, t], i) => { if (a >= 0 && /^\s+[A-Z]/.test(t) && !/\bDB\b/.test(t)) { if (!codeLines.has(a)) codeLines.set(a, i); } });
+let cpu, hw, mode = 'live', running = true, runTarget = null, prevRegs = null, snap = null, lastFull = 0, lastBusHTML = '';
+const sensors = { thr: 150, tilt: 88, bat: 200 };
+
+function freshHW() {
+  return { ctrl: 0, pa: 0, pb: 0, pc: 0, lcd: { mode4: false, nib: 0, half: null, addr: 0, ram: Array(0x50).fill(' ') },
+    pwm: { n: 0, on: [0,0,0,0], buzz: 0 }, duty: [0,0,0,0], buzzer: false, screen: '' };
+}
+function reset() {
+  cpu = new CPU(); hw = freshHW();
+  cpu.m[L.SIMMODE] = mode === 'test' ? 1 : 0;
+  cpu.out = onOut; cpu.inp = onIn; cpu.dos = ch => { if (ch !== '\r') hw.screen += ch; };
+  prevRegs = null; runTarget = null; snap = null; lastIOrec = null; lastBus = noBus;
+  if (mode === 'live') warmUp(); render(true);
+}
+function takeSnap() { const m = cpu.m; snap = { thr: m[L.THR], tilt: m[L.TILT], bat: m[L.BAT], l: m[L.LSPD], r: m[L.RSPD], alarm: m[L.ALARM], duty: hw.duty.slice() }; }
+let lastIOrec = null;
+function stepCPU() { cpu.step(); if (cpu.lastIO) lastIOrec = cpu.lastIO; if (cpu.halt) running = false; if (cpu.ip === L.MAINLOOP || cpu.halt) takeSnap(); }
+function warmUp() { for (let i = 0; i < 120000 && !cpu.halt; i++) stepCPU(); }
+function onIn(port) {
+  if (port === 0x00) { const ch = hw.pc & 3; hw.pa = [sensors.thr, sensors.tilt, sensors.bat, 0][ch]; return hw.pa; }
+  return 0xFF;
+}
+function onOut(port, v, at) {
+  if (port === 0x06) {
+    if (v & 0x80) { hw.ctrl = v; hw.pb = 0; hw.pc = 0; }
+    else { const bit = (v >> 1) & 7; hw.pc = v & 1 ? hw.pc | (1 << bit) : hw.pc & ~(1 << bit); }
+  } else if (port === 0x04) hw.pc = v;
+  else if (port === 0x02) {
+    if ((hw.pb & 0x20) && !(v & 0x20)) lcdNibble((hw.pc >> 4) & 15, (hw.pb >> 4) & 1);
+    hw.pb = v;
+    if (at === L.PWM_OUT) {
+      const p = hw.pwm; p.n++; [1,2,4,8].forEach((m, i) => { if (v & m) p.on[i]++; }); if (v & 0x40) p.buzz++;
+      if (p.n >= 255) { hw.duty = p.on.map(c => c / 255); hw.buzzer = p.buzz > 0; hw.pwm = { n: 0, on: [0,0,0,0], buzz: 0 }; }
+    }
+  }
+}
+function lcdNibble(n, rs) {
+  const d = hw.lcd;
+  if (!d.mode4) { d.nib++; if (d.nib >= 4) d.mode4 = true; return; }
+  if (d.half === null) { d.half = n; return; }
+  const b = (d.half << 4) | n; d.half = null;
+  if (rs) { if (d.addr < 0x50) d.ram[d.addr] = String.fromCharCode(b); d.addr++; }
+  else if (b === 0x01) { d.ram.fill(' '); d.addr = 0; }
+  else if (b & 0x80) d.addr = b & 0x7F;
+}
+
+/* ---------------- UI ---------------- */
+const $ = id => document.getElementById(id);
+const regNames = ['AX','BX','CX','DX','SP','BP','SI','DI','CS','DS','SS','ES','IP'];
+const regIdx = { AX:0, CX:1, DX:2, BX:3, SP:4, BP:5, SI:6, DI:7 };
+$('regs').innerHTML = regNames.map(n => `<div class="reg" id="r${n}"><span>${n}</span><b class="mono"></b></div>`).join('');
+const flagOrder = [['OF','O'],['DF','D'],['IF','I'],['TF','T'],['SF','S'],['ZF','Z'],['AF','A'],['PF','P'],['CF','C']];
+$('flags').innerHTML = flagOrder.map(([n]) => `<div class="flag" id="f${n}">${n}<i>0</i></div>`).join('');
+const bitLabels = {
+  pA: ['D0','D1','D2','D3','D4','D5','D6','D7'],
+  pB: ['M1','M2','M3','M4','RS','E','BUZ','–'],
+  pC: ['ADD A','ADD B','START','OE','D4','D5','D6','D7']
+};
+for (const k in bitLabels) $(k).innerHTML = bitLabels[k].map((t, i) => `<div class="bit" id="${k}${i}"><div class="led"></div>${k === 'pA' ? 'PA' : k === 'pB' ? 'PB' : 'PC'}${i}<br>${t}</div>`).join('');
+['lcd0','lcd1'].forEach(id => $(id).innerHTML = '<span>&nbsp;</span>'.repeat(16));
+const targets = ['MAINLOOP','READ_ADC','CONTROL','STABILISE','CLAMP','PWM_FRAME','SHOW'];
+$('runTo').innerHTML = targets.map(t => `<option value="${t}">${t}</option>`).join('');
+$('code').innerHTML = DATA.lines.map(([a, t], i) => `<div id="ln${i}"><span class="n">${i + 1}</span><span class="a">${a >= 0 && codeLines.has(a) && codeLines.get(a) === i ? hex(a, 4) : ''}</span><span class="c"></span></div>`).join('');
+DATA.lines.forEach(([, t], i) => { $('ln' + i).lastChild.textContent = t || ' '; });
+const varNames = ['THR','TILT','BAT','LSPD','RSPD','ALARM','CASENO'];
+$('vars').innerHTML = varNames.map(n => `<tr><td class="mono">${n}</td><td class="mono">${hex(SEG,4)}:${hex(L[n], 4)}</td><td class="mono val" id="v${n}"></td></tr>`).join('');
+
+/* rotors on the top view */
+const rotorPos = [[70,70,'M1','front-left'],[230,70,'M2','front-right'],[70,230,'M3','rear-left'],[230,230,'M4','rear-right']];
+$('rotors').innerHTML = rotorPos.map(([x, y, n], i) => `
+  <g transform="translate(${x} ${y})">
+    <circle r="46" fill="var(--panel)" stroke="var(--line)" stroke-width="2"/>
+    <circle id="ring${i}" r="46" fill="none" stroke="var(--accent)" stroke-width="5" stroke-dasharray="0 400" transform="rotate(-90)"/>
+    <g id="blade${i}"><rect x="-38" y="-5" width="76" height="10" rx="5" fill="var(--rotor)" opacity=".85"/><rect x="-5" y="-38" width="10" height="76" rx="5" fill="var(--rotor)" opacity=".35"/></g>
+    <circle r="9" fill="var(--panel-2)" stroke="var(--frame)" stroke-width="2"/>
+    <text y="${y < 150 ? -56 : 70}" text-anchor="middle" class="svg-ink" style="font:600 17px var(--f-mono)">${n} <tspan id="pct${i}" class="svg-muted">0%</tspan></text>
+  </g>`).join('');
+const angles = [0,0,0,0];
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function describeIO(io) {
+  if (!io) return null;
+  const portName = { 0: 'Port A', 2: 'Port B', 4: 'Port C', 6: 'Control register' }[io.port] || 'unmapped port';
+  const a2a1 = ((io.port >> 2) & 1) + ' ' + ((io.port >> 1) & 1);
+  const w = io.dir === 'out';
+  return `<div class="head">${w ? 'OUT' : 'IN'} · I/O ${w ? 'write' : 'read'} · port ${hex(io.port, 2)}H = 8255 ${portName} · data ${hex(io.val, 2)}H</div>
+    <ol>
+      <li><b>T1</b> address ${hex(io.port, 5)}H out, M/IO̅ = 0, ALE latches it. A5 A4 A3 = 000 and A0 = 0, so the 74LS138 selects the 8255; A2 A1 = ${a2a1}.</li>
+      <li><b>T2</b> ${w ? 'WR̅ low, AL placed on D0–D7, DT/R̅ = 1' : 'RD̅ low, DT/R̅ = 0, the 8255 drives D0–D7'}, DEN̅ = 0.</li>
+      <li><b>T3</b> data held on D0–D7 (even port, so BHE̅ = 1).</li>
+      <li><b>T4</b> ${w ? 'WR̅ rises, the 8255 latches the byte' : 'RD̅ rises, the 8086 has the byte in AL'}.</li>
+    </ol>`;
+}
+const noBus = '<div class="head">No I/O yet</div><span class="note">The last IN or OUT instruction will be broken down into its bus cycle here.</span>';
+let lastBus = noBus;
+let curLine = -1;
+
+function render(full) {
+  const R = cpu.r, ip = cpu.ip;
+  const li = codeLines.get(ip);
+  if (full) {
+  const regVals = { AX: R[0], BX: R[3], CX: R[1], DX: R[2], SP: R[4], BP: R[5], SI: R[6], DI: R[7], CS: SEG, DS: SEG, SS: SEG, ES: SEG, IP: ip };
+  for (const n of regNames) { const el = $('r' + n); el.lastChild.textContent = hex(regVals[n], 4); el.classList.toggle('changed', !running && !!prevRegs && prevRegs[n] !== regVals[n] && n !== 'IP'); }
+  prevRegs = regVals;
+  for (const [n, k] of flagOrder) { const el = $('f' + n); el.lastChild.textContent = cpu.f[k] ? '1' : '0'; el.classList.toggle('on', !!cpu.f[k]); }
+  const src = li !== undefined ? DATA.lines[li][1].replace(/;.*$/, '').trim() : '(no source line)';
+  const bytes = []; let len = 1; const next = [...codeLines.keys()].filter(a => a > ip).sort((a, b) => a - b)[0]; if (next) len = Math.min(6, next - ip);
+  for (let i = 0; i < len; i++) bytes.push(hex(cpu.m[ip + i], 2));
+  const label = Object.entries(L).find(([, a]) => a === ip);
+  $('iSrc').textContent = cpu.halt ? (cpu.err ? 'Stopped: ' + cpu.err : 'Program finished (INT 21H, AH = 4CH)') : src;
+  $('iMeta').textContent = `CS:IP = ${hex(SEG, 4)}:${hex(ip, 4)}   bytes ${bytes.join(' ')}${label ? '   label ' + label[0] : ''}`;
+  $('iPhys').textContent = `Physical = ${hex(SEG, 4)}H × 10H + ${hex(ip, 4)}H = ${hex(SEG * 16 + ip, 5)}H`;
+  const d = describeIO(lastIOrec); if (d) lastBus = d; if (lastBus !== lastBusHTML) { $('bus').innerHTML = lastBus; lastBusHTML = lastBus; }
+  $('count').textContent = `Instructions executed: ${cpu.steps.toLocaleString('en-IN')}`;
+  // ports
+  [['pA', hw.pa], ['pB', hw.pb], ['pC', hw.pc]].forEach(([k, v]) => { $(k + 'v').textContent = hex(v, 2) + 'H'; for (let i = 0; i < 8; i++) $(k + i).classList.toggle('on', !!(v >> i & 1)); });
+  $('ctrlNote').textContent = `Control register: last mode word ${hex(hw.ctrl, 2)}H${hw.ctrl === 0x90 ? ' (mode 0, A in, B out, C out)' : ''}. ADC channel = ${hw.pc & 3}.`;
+  varNames.forEach(n => { $('v' + n).textContent = cpu.m[L[n]]; });
+  // listing
+  const follow = !running || +$('speed').value <= 40;
+  if (li !== undefined && li !== curLine && follow) {
+    if (curLine >= 0) $('ln' + curLine).classList.remove('cur');
+    $('ln' + li).classList.add('cur'); curLine = li;
+    const box = $('code'), row = $('ln' + li);
+    const top = row.offsetTop - box.offsetTop;
+    if (top < box.scrollTop + 20 || top > box.scrollTop + box.clientHeight - 40) box.scrollTop = top - box.clientHeight / 2;
+  }
+  renderCalc();
+  }
+  // drone
+  for (let i = 0; i < 4; i++) {
+    const du = hw.duty[i]; $('pct' + i).textContent = Math.round(du * 100) + '%';
+    $('ring' + i).setAttribute('stroke-dasharray', `${(du * 289).toFixed(1)} 400`);
+  }
+  const tiltVal = snap ? snap.tilt : cpu.m[L.TILT];
+  const ang = (tiltVal - 128) / 128 * 25;
+  $('side').setAttribute('transform', `rotate(${ang.toFixed(1)} 130 92)`);
+  const thrust = (g, x, du) => { const h = 8 + du * 52; $(g).innerHTML = `<line x1="${x}" y1="84" x2="${x}" y2="${84 - h}" stroke="var(--accent)" stroke-width="5" stroke-linecap="round"/><path d="M${x - 8} ${92 - h} L${x} ${78 - h} L${x + 8} ${92 - h} Z" fill="var(--accent)"/>`; };
+  thrust('thrustL', 64, (hw.duty[0] + hw.duty[2]) / 2); thrust('thrustR', 196, (hw.duty[1] + hw.duty[3]) / 2);
+  const S = snap || { thr: cpu.m[L.THR], l: cpu.m[L.LSPD], r: cpu.m[L.RSPD], alarm: cpu.m[L.ALARM], tilt: cpu.m[L.TILT] };
+  const lsp = S.l, rsp = S.r, thr = S.thr, corr = lsp - thr;
+  const alarm = S.alarm === 1;
+  $('droneChips').innerHTML = (alarm
+      ? `<span class="chip alarm"><span class="dot"></span>Buzzer on · battery low · landing</span>`
+      : `<span class="chip ok"><span class="dot"></span>Battery OK</span>`) +
+    `<span class="chip mono">L = ${lsp} · R = ${rsp}</span>` +
+    (!alarm ? `<span class="chip">${corr === 0 ? 'Level, no correction' : corr > 0 ? 'Left side low · correction ' + corr + ', left side speeds up' : 'Right side low · correction ' + (-corr) + ', right side speeds up'}</span>` : '');
+  const ram = hw.lcd.ram;
+  ['lcd0','lcd1'].forEach((id, row) => { const spans = $(id).children; for (let i = 0; i < 16; i++) spans[i].textContent = ram[row * 0x40 + i] === ' ' ? ' ' : ram[row * 0x40 + i]; });
+  $('screen').textContent = hw.screen || '(output appears here as the program runs)';
+  // status
+  if (full) {
+  const where = Object.entries(L).filter(([, a]) => a <= ip && codeLines.has(a)).sort((a, b) => b[1] - a[1])[0];
+  $('status').innerHTML = cpu.halt ? `<b>${cpu.err ? 'Stopped' : 'Finished'}</b>` : running ? `<b>Running</b> · in ${where ? where[0] : '–'}` : `<b>Paused</b> · in ${where ? where[0] : '–'}`;
+  $('runBtn').textContent = running && !cpu.halt ? 'Pause' : 'Run';
+  }
+}
+
+function renderCalc() {
+  const body = $('calcBody');
+  if (!snap) { body.innerHTML = '<tr><td></td><td colspan="3">Waiting for the first loop to finish.</td></tr>'; $('calcNote').textContent = ''; return; }
+  const { thr, tilt, bat, l, r, alarm } = snap, V = x => (x * 5 / 255).toFixed(2) + ' V', pc = x => (x / 255 * 100).toFixed(1) + ' %';
+  const rows = [];
+  rows.push(['ADC readings', `THR = ${thr}, TILT = ${tilt}, BAT = ${bat}  (volts = reading × 5 ÷ 255)`, `${V(thr)}, ${V(tilt)}, ${V(bat)}`]);
+  let eL, eR;
+  if (bat < 100) {
+    rows.push(['Battery check', `BAT = ${bat} < 100, so CF = 1 after CMP and JAE is not taken`, 'Landing']);
+    rows.push(['Landing speed', 'Both sides set to LAND_SP', 'L = 60, R = 60']);
+    rows.push(['Buzzer', 'ALARM = 1, so PB6 is set in every PWM step', 'On']);
+    eL = 60; eR = 60;
+  } else {
+    const err = 128 - tilt, corr = Math.floor(err / 4), rawL = thr + corr, rawR = thr - corr;
+    eL = Math.max(0, Math.min(255, rawL)); eR = Math.max(0, Math.min(255, rawR));
+    rows.push(['Battery check', `BAT = ${bat} ≥ 100, so JAE jumps to STABILISE`, 'Normal flight']);
+    rows.push(['Tilt error', `128 − TILT = 128 − ${tilt}`, String(err)]);
+    rows.push(['Correction', `${err} ÷ 4 with SAR AX, CL (rounds down)`, String(corr)]);
+    rows.push(['Left speed', `THR + corr = ${thr} + (${corr})`, String(rawL)]);
+    rows.push(['Right speed', `THR − corr = ${thr} − (${corr})`, String(rawR)]);
+    rows.push(['Clamp 0–255', rawL === eL && rawR === eR ? 'Both already inside 0–255' : `${rawL !== eL ? rawL + ' → ' + eL : ''}${rawL !== eL && rawR !== eR ? ', ' : ''}${rawR !== eR ? rawR + ' → ' + eR : ''}`, `L = ${eL}, R = ${eR}`]);
+  }
+  rows.push(['PWM duty', `L ÷ 255 and R ÷ 255 (motor on for that many of 255 steps)`, `${pc(eL)}, ${pc(eR)}`]);
+  const ok = eL === l && eR === r && (bat < 100) === (alarm === 1);
+  body.innerHTML = rows.map((x, i) => `<tr><td>${i + 1}</td><td>${x[0]}</td><td>${x[1]}</td><td class="res">${x[2]}</td></tr>`).join('');
+  $('calcNote').innerHTML = `8086 result in memory: LSPD = ${l}, RSPD = ${r}, ALARM = ${alarm}. ` + (ok ? '<span class="match">Matches the hand calculation.</span>' : '<span class="nomatch">Does not match yet (inputs changed mid-loop).</span>');
+}
+
+let lastT = performance.now();
+function frame(t) {
+  const dt = Math.min(0.05, (t - lastT) / 1000); lastT = t;
+  if (running && !cpu.halt) {
+    const n = +$('speed').value;
+    for (let i = 0; i < n && !cpu.halt; i++) {
+      stepCPU();
+      if (runTarget !== null && cpu.ip === runTarget) { running = false; runTarget = null; break; }
+    }
+    const full = !running || n <= 40 || t - lastFull > 300;
+    if (full) lastFull = t;
+    render(full);
+  }
+  if (!reduceMotion) for (let i = 0; i < 4; i++) { angles[i] = (angles[i] + hw.duty[i] * 1600 * dt * (i === 0 || i === 3 ? 1 : -1)) % 360; $('blade' + i).setAttribute('transform', `rotate(${angles[i].toFixed(1)})`); }
+  requestAnimationFrame(frame);
+}
+
+/* controls */
+function setMode(m) {
+  mode = m; $('modeLive').setAttribute('aria-pressed', m === 'live'); $('modeTest').setAttribute('aria-pressed', m === 'test');
+  $('lcdBox').hidden = m === 'test'; $('screenBox').hidden = m === 'live';
+  ['sThr','sTilt','sBat'].forEach(id => $(id).disabled = m === 'test');
+  document.querySelectorAll('.presets button').forEach(b => b.disabled = m === 'test');
+  running = m === 'live'; reset();
+}
+$('modeLive').onclick = () => setMode('live');
+$('modeTest').onclick = () => setMode('test');
+$('runBtn').onclick = () => { if (cpu.halt) return; running = !running; runTarget = null; render(true); };
+$('stepBtn').onclick = () => { running = false; runTarget = null; stepCPU(); render(true); };
+$('resetBtn').onclick = () => { running = mode === 'live'; reset(); };
+$('runToBtn').onclick = () => { if (cpu.halt) return; runTarget = L[$('runTo').value]; if (cpu.ip === runTarget) stepCPU(); running = true; render(true); };
+function syncSensors() {
+  sensors.thr = +$('sThr').value; sensors.tilt = +$('sTilt').value; sensors.bat = +$('sBat').value;
+  const v = x => (x * 5 / 255).toFixed(2) + ' V';
+  $('oThr').textContent = `${sensors.thr} · ${v(sensors.thr)}`;
+  $('oTilt').textContent = `${sensors.tilt} · ${v(sensors.tilt)}`;
+  $('oBat').textContent = `${sensors.bat} · ${v(sensors.bat)}`;
+}
+['sThr','sTilt','sBat'].forEach(id => $(id).addEventListener('input', syncSensors));
+document.querySelectorAll('.presets button').forEach(b => b.onclick = () => {
+  const [a, t, c] = b.dataset.p.split(',').map(Number); $('sThr').value = a; $('sTilt').value = t; $('sBat').value = c; syncSensors();
+  if (!running && !cpu.halt) { for (let i = 0; i < 60000 && !cpu.halt; i++) stepCPU(); render(true); }
+});
+syncSensors(); setMode('live');
+requestAnimationFrame(frame);
+</script>
+
+</body>
+</html>
